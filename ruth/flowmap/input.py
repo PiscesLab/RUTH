@@ -173,18 +173,38 @@ def add_meters_driven_column(df):
     df['previous_start_offset_m'] = df['start_offset_m'].shift(1)
     df['previous_segment_length'] = df['segment_length'].shift(1)
     df['meters_driven'] = df['start_offset_m'] - df['previous_start_offset_m']
-    df.loc[df['previous_segment_ig'] != df['segment_id'], 'meters_driven'] += df['previous_segment_length']
+    # Ensure meters_driven and previous_segment_length columns exist
+        # Ensure meters_driven and previous_segment_length columns exist
+    if 'meters_driven' not in df.columns:
+        df['meters_driven'] = 0.0
+
+    # Coerce to numeric (float32 keeps memory lower; change to float64 if you prefer)
+    df['meters_driven'] = pd.to_numeric(df['meters_driven'], errors='coerce').fillna(0.0).astype(np.float32)
+    df['previous_segment_length'] = pd.to_numeric(
+        df.get('previous_segment_length', 0),
+        errors='coerce').fillna(0.0).astype(np.float32)
+
+    # Perform the conditional addition safely (avoid in-place '+=' which triggers dtype coercion warnings)
+    mask = df['previous_segment_ig'] != df['segment_id']
+    df.loc[mask, 'meters_driven'] = (
+        df.loc[mask, 'meters_driven'] + df.loc[mask, 'previous_segment_length']
+    )
 
     # clear the meters driven for the first timestamp of each vehicle
     df.loc[df['previous_vehicle_id'] != df['vehicle_id'], 'meters_driven'] = 0
 
     # drop the columns that are not needed anymore
-    df.drop(columns=['previous_segment_ig',
-                     'previous_vehicle_id',
-                     'previous_start_offset_m',
-                     'previous_segment_length'],
-            inplace=True)
+    df.drop(
+        columns=[
+            'previous_segment_ig',
+            'previous_vehicle_id',
+            'previous_start_offset_m',
+            'previous_segment_length'
+        ],
+        inplace=True
+    )
     return df
+
 
 
 def round_timestamps(df, speed, fps, column):

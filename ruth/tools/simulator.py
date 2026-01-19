@@ -91,7 +91,7 @@ def prepare_simulator(common_args: CommonArgs, vehicles_path, alternatives_ratio
     stuck_detection = common_args.stuck_detection
     plateau_default_route = common_args.plateau_default_route
 
-    simulation = Simulation.load(continue_from) if continue_from != '' else None
+    simulation = Simulation.load(continue_from) if continue_from else None
 
     # TODO: solve the debug symbol
     if simulation is None:

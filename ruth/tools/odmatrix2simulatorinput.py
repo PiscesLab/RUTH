@@ -11,6 +11,7 @@ from functools import partial
 from multiprocessing import Pool
 from matplotlib import pyplot as plt
 from tqdm import tqdm
+import random
 
 from ..data.map import Map, BBox
 
@@ -26,7 +27,7 @@ def gps_to_nodes_with_shortest_path(od_for_id, bbox, download_date, data_dir):
     if routing_map is None:
         routing_map = create_routing_map(bbox, download_date, data_dir)
 
-    id, origin_lon, origin_lat, destination_lon, destination_lat, time_offset = od_for_id
+    id, origin_lon, origin_lat, destination_lon, destination_lat, time_offset, vehicle_type = od_for_id
 
     origin_node_id = ox.nearest_nodes(routing_map.network, origin_lon, origin_lat)
     dest_node_id = ox.nearest_nodes(routing_map.network, destination_lon, destination_lat)
@@ -35,7 +36,7 @@ def gps_to_nodes_with_shortest_path(od_for_id, bbox, download_date, data_dir):
     except networkx.NetworkXNoPath:
         osm_route = None
 
-    return id, origin_node_id, dest_node_id, time_offset, osm_route
+    return id, origin_node_id, dest_node_id, time_offset, osm_route, vehicle_type
 
 
 def get_active_and_state(row):
@@ -89,6 +90,8 @@ def convert(od_matrix_path, download_date, increase_lat, increase_lon,
 
     odm_df = pd.read_csv(od_matrix_path, sep=csv_separator)
 
+    odm_df["vehicle_type"] = [random.choice(["car", "car", "car", "car", "truck"]) for _ in range(len(odm_df))]  # 80% car, 20% truck
+
     lat_min = min(odm_df["lat_from"].min(), odm_df["lat_to"].min(), lat_min)
     lat_max = max(odm_df["lat_from"].max(), odm_df["lat_to"].max(), lat_max)
     lon_min = min(odm_df["lon_from"].min(), odm_df["lon_to"].min(), lon_min)
@@ -126,13 +129,13 @@ def convert(od_matrix_path, download_date, increase_lat, increase_lon,
                               odm_df[["id",
                                       "lon_from", "lat_from",
                                       "lon_to", "lat_to",
-                                      "start_offset_s"]].itertuples(index=False, name=None)):
+                                      "start_offset_s", "vehicle_type"]].itertuples(index=False, name=None)):
                 od_nodes.append(odn)
                 pbar.update()
 
     od_nodes = sorted(od_nodes, key=lambda id_origin_dest: id_origin_dest[0])
 
-    df = pd.DataFrame(od_nodes, columns=["id", "origin_node", "dest_node", "time_offset", "osm_route"])
+    df = pd.DataFrame(od_nodes, columns=["id", "origin_node", "dest_node", "time_offset", "osm_route", "vehicle_type"])
 
     df[["start_index", "start_distance_offset",
         "frequency", "fcd_sampling_period", "download_date",

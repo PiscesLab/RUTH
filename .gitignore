@@ -10,3 +10,21 @@ venv/
 **/*.csv
 simulation_output.h5
 .DS_Store
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Generated animations / outputs
+*.mp4
+*.gif
+
+# Simulation outputs
+*.pickle
+*.h5
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/

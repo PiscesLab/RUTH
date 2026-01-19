@@ -3,6 +3,7 @@ from datetime import timedelta
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
 
 from .data.segment import SegmentId, SpeedKph
+from .vehicle_types import DEFAULT_VEHICLE_CLASSES
 
 if TYPE_CHECKING:
     from .simulator.simulation import FCDRecord
@@ -32,18 +33,19 @@ class GlobalView:
         else:
             self.car_to_segment[fcd.vehicle_id] = fcd.segment.id
 
-    def number_of_vehicles_ahead(self, datetime, segment_id, tolerance=None, vehicle_id=-1,
+    def length_of_vehicles_ahead(self, datetime, segment_id, tolerance=None, vehicle_id=-1,
                                  vehicle_offset_m=0):
-        # counts all vehicles ahead of the vehicle with vehicle_id at the given segment_id at given time range
-        # if case vehicle_id not set, then all vehicles are counted
+        # sums the lengths of all vehicles ahead of the vehicle with vehicle_id at the given segment_id at given time range
+        # if case vehicle_id not set, then all vehicles are summed
 
         tolerance = tolerance if tolerance is not None else timedelta(seconds=0)
-        vehicles = set()
+        total_length = 0.0
         for fcd in self.fcd_by_segment.get(segment_id, []):
             if datetime - tolerance <= fcd.datetime <= datetime + tolerance:
                 if fcd.vehicle_id != vehicle_id and fcd.start_offset > vehicle_offset_m:
-                    vehicles.add(fcd.vehicle_id)
-        return len(vehicles)
+                    vehicle_params = DEFAULT_VEHICLE_CLASSES.get(fcd.vehicle_type, DEFAULT_VEHICLE_CLASSES["car"])
+                    total_length += vehicle_params.length_m
+        return total_length
 
     def level_of_service_in_front_of_vehicle(self, datetime, segment, vehicle_id=-1,
                                              vehicle_offset_m=0, tolerance=None, limit_vehicle_count=False):
@@ -56,13 +58,12 @@ class GlobalView:
             ((20, 30), (0.4, 0.6)),
             ((30, 42), (0.6, 0.8)),
             ((42, 67), (0.8, 1.0))]
-        aprox_vehicles_length = 5  # length of the vehicle in meters
 
-        n_vehicles = self.number_of_vehicles_ahead(datetime, segment.id, tolerance,
+        n_vehicles = self.length_of_vehicles_ahead(datetime, segment.id, tolerance,
                                                    vehicle_id, vehicle_offset_m)
 
         if limit_vehicle_count and vehicle_offset_m == 0.0:
-            vehicles_length = n_vehicles * aprox_vehicles_length
+            vehicles_length = n_vehicles
             if vehicles_length > segment.length:
                 return float("inf")
 
@@ -73,9 +74,9 @@ class GlobalView:
 
         # rescale density
         if rest_segment_length < ending_length:
-            n_vehicles_per_mile = n_vehicles * mile / ending_length
+            n_vehicles_per_mile = (n_vehicles / 5.0) * mile / ending_length  # assuming average 5m per vehicle
         else:
-            n_vehicles_per_mile = n_vehicles * mile / (rest_segment_length * segment.lanes)
+            n_vehicles_per_mile = (n_vehicles / 5.0) * mile / (rest_segment_length * segment.lanes)
 
         los = float("inf")  # in case the vehicles are stuck in traffic jam
         for (low, high), (m, n) in ranges:

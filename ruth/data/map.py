@@ -209,10 +209,23 @@ class Map:
                     [self.remapped_nodes.get(node, node) for node in v.osm_route])]
 
                 for node_from, node_to in zip(v.osm_route[:-1], v.osm_route[1:]):
-                    if not self.original_network.has_edge(node_from, node_to):
-                        cl.error(f"No link between {node_from} and {node_to} in the network.")
-                        v.osm_route = []
-                        v.active = False
+                    if not self.current_network.has_edge(node_from, node_to):
+                        cl.warning(f"No link between {node_from} and {node_to} in the network. Recalculating route.")
+                        # Try to recalculate the route
+                        try:
+                            new_route = self.shortest_path(v.origin_node, v.dest_node)
+                            if new_route and len(new_route) > 1:
+                                v.osm_route = new_route
+                                cl.info(f"Recalculated route for vehicle {v.id}")
+                                break
+                            else:
+                                cl.error(f"Could not recalculate route for vehicle {v.id}")
+                                v.osm_route = []
+                                v.active = False
+                        except Exception as e:
+                            cl.error(f"Error recalculating route for vehicle {v.id}: {e}")
+                            v.osm_route = []
+                            v.active = False
                         break
 
                 if v.osm_route:

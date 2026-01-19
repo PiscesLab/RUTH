@@ -12,6 +12,7 @@ from networkx.exception import NodeNotFound
 
 from .data.map import Map
 from .data.segment import SegmentPosition, LengthMeters, RouteWithTime
+from .vehicle_types import DEFAULT_VEHICLE_CLASSES
 from .utils import round_timedelta
 
 
@@ -159,6 +160,8 @@ class Vehicle:
             self.frequency = self.frequency.to_pytimedelta()
         if isinstance(self.time_offset, pd.Timedelta):
             self.time_offset = self.time_offset.to_pytimedelta()
+        if isinstance(self.fcd_sampling_period, pd.Timedelta):
+            self.fcd_sampling_period = self.fcd_sampling_period.to_pytimedelta()
 
     def __getstate__(self):
         state = asdict(self)
@@ -202,6 +205,16 @@ class Vehicle:
         if self.start_index + 1 >= len(self.osm_route):
             return None
         return self.osm_route[self.start_index + 1]
+
+    @property
+    def vehicle_params(self):
+        """Get the vehicle class parameters based on vehicle_type."""
+        return DEFAULT_VEHICLE_CLASSES.get(self.vehicle_type, DEFAULT_VEHICLE_CLASSES["car"])
+
+    @property
+    def max_speed_mps(self):
+        """Get the maximum speed of the vehicle in m/s."""
+        return self.vehicle_params.max_speed_mps
 
     @property
     def map_id(self) -> int:

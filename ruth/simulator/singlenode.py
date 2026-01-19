@@ -46,6 +46,11 @@ class Simulator:
             the current state of simulation. It can be used for storing the state, for example.
         """
 
+        # Check if there are any active vehicles
+        if not any(v.active for v in self.sim.vehicles):
+            logger.warning("No active vehicles found. Simulation cannot proceed.")
+            return
+
         for v in self.sim.vehicles:
             v.frequency = timedelta(seconds=5)
 

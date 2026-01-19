@@ -52,7 +52,9 @@ def move_on_segment(
         return current_time + vehicle.frequency, vehicle.segment_position, SpeedMps(0.0)
 
     # Speed in m/s
-    speed_mps = speed_kph_to_mps(current_segment.max_allowed_speed_kph * level_of_service)
+    segment_max_speed = speed_kph_to_mps(current_segment.max_allowed_speed_kph * level_of_service)
+    vehicle_max_speed = vehicle.max_speed_mps
+    speed_mps = min(segment_max_speed, vehicle_max_speed)
     if math.isclose(speed_mps, 0.0):
         # in case the vehicle is not moving, move the time and keep the previous position
         return current_time + vehicle.frequency, vehicle.segment_position, SpeedMps(0.0)
@@ -188,7 +190,8 @@ def generate_fcds(start_time: datetime, end_time: datetime, start_segment_positi
             start_offset=current_position,
             speed=speed,
             status=vehicle.status,
-            active=True
+            active=True,
+            vehicle_type=vehicle.vehicle_type
         ))
 
     # store end of the movement
@@ -199,7 +202,8 @@ def generate_fcds(start_time: datetime, end_time: datetime, start_segment_positi
         start_offset=end_segment_position.position,
         speed=speed,
         status=vehicle.status,
-        active=remains_active
+        active=remains_active,
+        vehicle_type=vehicle.vehicle_type
     ))
     return fcds
 

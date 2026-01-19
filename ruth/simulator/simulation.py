@@ -25,6 +25,7 @@ class FCDRecord:
     speed: SpeedMps
     status: str
     active: bool
+    vehicle_type: str
 
 
 @dataclass

@@ -88,17 +88,44 @@ class FCDHistory:
         return pd.DataFrame(data)
 
     def to_dataframe_short(self):
-        data = {
-            "timestamp": [fcd.datetime for fcd in self.fcd_history],
-            "node_from": pd.array([fcd.segment.node_from for fcd in self.fcd_history], dtype="Int64"),
-            "node_to": pd.array([fcd.segment.node_to for fcd in self.fcd_history], dtype="Int64"),
-            "segment_length": pd.array([fcd.segment.length for fcd in self.fcd_history], dtype="float"),
-            "vehicle_id": pd.array([fcd.vehicle_id for fcd in self.fcd_history], dtype="Int32"),
-            "start_offset_m": pd.array([fcd.start_offset for fcd in self.fcd_history], dtype="float"),
-            "speed_mps": pd.array([fcd.speed for fcd in self.fcd_history], dtype="float"),
-        }
-
-        return pd.DataFrame(data)
+        # If we have in-memory data, use it
+        if self.fcd_history:
+            data = {
+                "timestamp": [fcd.datetime for fcd in self.fcd_history],
+                "node_from": pd.array([fcd.segment.node_from for fcd in self.fcd_history], dtype="Int64"),
+                "node_to": pd.array([fcd.segment.node_to for fcd in self.fcd_history], dtype="Int64"),
+                "segment_length": pd.array([fcd.segment.length for fcd in self.fcd_history], dtype="float"),
+                "vehicle_id": pd.array([fcd.vehicle_id for fcd in self.fcd_history], dtype="Int32"),
+                "start_offset_m": pd.array([fcd.start_offset for fcd in self.fcd_history], dtype="float"),
+                "speed_mps": pd.array([fcd.speed for fcd in self.fcd_history], dtype="float"),
+            }
+            return pd.DataFrame(data)
+        
+        # Otherwise, load from HDF5 if it exists
+        import h5py
+        try:
+            with h5py.File(self.path, 'r') as f:
+                if 'fcd' in f:
+                    df = pd.DataFrame(f['fcd'][:])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                    # Drop active column like load_h5_df does
+                    if 'active' in df.columns:
+                        df.drop(columns=['active'], inplace=True)
+                    # Rename columns to match expected format
+                    df = df.rename(columns={
+                        'node_from': 'node_from',
+                        'node_to': 'node_to', 
+                        'segment_length': 'segment_length',
+                        'vehicle_id': 'vehicle_id',
+                        'start_offset_m': 'start_offset_m',
+                        'speed_mps': 'speed_mps'
+                    })
+                    return df[['timestamp', 'node_from', 'node_to', 'segment_length', 'vehicle_id', 'start_offset_m', 'speed_mps']]
+        except Exception as e:
+            print(f"Error loading from HDF5: {e}")
+        
+        # Return empty dataframe if no data
+        return pd.DataFrame(columns=['timestamp', 'node_from', 'node_to', 'segment_length', 'vehicle_id', 'start_offset_m', 'speed_mps'])
 
 
     def speed_in_time_at_segment(self, datetime, node_from, node_to):
