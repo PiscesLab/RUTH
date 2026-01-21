@@ -28,3 +28,5 @@ __pycache__/
 
 # VS Code
 .vscode/
+
+fcd_history.h5
