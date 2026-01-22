@@ -5,7 +5,7 @@ from typing import List, Tuple
 
 from .queues import QueuesManager
 from ..data.map import Map
-from ..data.segment import Segment, SegmentPosition, SpeedMps, LengthMeters, speed_kph_to_mps
+from ..data.segment import Segment, SegmentPosition, SpeedMps, SpeedKph, LengthMeters, speed_kph_to_mps
 from .simulation import FCDRecord
 from ..globalview import GlobalView
 from ..vehicle import Vehicle
@@ -44,7 +44,8 @@ def move_on_segment(
         level_of_service = 1.0
     else:
         level_of_service = gv_db.level_of_service_in_front_of_vehicle(current_time, current_segment, vehicle.id,
-                                                                         start_position, los_vehicles_tolerance)
+                                                                         start_position, los_vehicles_tolerance,
+                                                                         limit_vehicle_count=(start_position == 0.0))
 
     # if car is stuck in traffic jam, it will not move and its speed will be 0
     if level_of_service == float("inf"):
@@ -52,7 +53,19 @@ def move_on_segment(
         return current_time + vehicle.frequency, vehicle.segment_position, SpeedMps(0.0)
 
     # Speed in m/s
-    segment_max_speed = speed_kph_to_mps(current_segment.max_allowed_speed_kph * level_of_service)
+    # Get highway type from the map
+    try:
+        highway_data = routing_map.current_network[current_segment.node_from][current_segment.node_to][0].get('highway', 'unclassified')
+        if isinstance(highway_data, list):
+            highway_type = highway_data[0]  # Take the primary highway type
+        else:
+            highway_type = highway_data
+    except KeyError:
+        highway_type = 'unclassified'  # Fallback if edge not found
+    
+    from ..utils import get_speed_limit_kph
+    speed_limit_kph = get_speed_limit_kph(highway_type, vehicle.vehicle_type)
+    segment_max_speed = speed_kph_to_mps(SpeedKph(speed_limit_kph * level_of_service))
     vehicle_max_speed = vehicle.max_speed_mps
     speed_mps = min(segment_max_speed, vehicle_max_speed)
     if math.isclose(speed_mps, 0.0):
