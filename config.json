@@ -18,7 +18,7 @@
   },
   "run" :
   {
-    "vehicles-path": "benchmarks/od-matrices/vehicles_with_types.parquet"
+    "vehicles-path": "/users/Dinisha/RUTH/benchmarks/od-matrices/vehicles_10k_with_types.parquet"
   },
   "alternatives" : {
     "dijkstra-fastest": 1.0,
