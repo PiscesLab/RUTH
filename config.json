@@ -21,12 +21,12 @@
     "vehicles-path": "/users/Dinisha/RUTH/benchmarks/od-matrices/vehicles_10k_with_types.parquet"
   },
   "alternatives" : {
-    "dijkstra-fastest": 1.0,
+    "dijkstra-fastest": 0.5,
     "dijkstra-shortest": 0.0,
     "plateau-fastest": 0.0
   },
   "route-selection" : {
-    "first": 1.0,
+    "first": 0.5,
     "random": 0.0,
     "ptdr": 0.0
   },

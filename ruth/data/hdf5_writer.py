@@ -5,7 +5,8 @@ import h5py
 import numpy as np
 from pathlib import Path
 
-
+# UTF-8 variable-length string dtype for HDF5
+vtype_dtype = h5py.string_dtype(encoding="utf-8")
 # Extended compound dtype for HDF5 (adds vehicle_type as fixed-length ASCII)
 compound_dtype = np.dtype([
     ("timestamp", np.int64),  # Timestamp in seconds
@@ -16,7 +17,7 @@ compound_dtype = np.dtype([
     ("start_offset_m", np.float32),
     ("speed_mps", np.float32),
     ("active", np.bool_),
-    ("vehicle_type", "S10"),  # new field: fixed-length ASCII
+    ("vehicle_type", vtype_dtype),  # new field: fixed-length ASCII
 ])
 
 class HDF5Writer:
@@ -112,10 +113,14 @@ class HDF5Writer:
             start_off = float(fcd.start_offset)
             speed = float(fcd.speed)
             active = bool(fcd.active)
-            vtype = _get_vtype(vid)
-            # ensure bytes fit S10
-            vtype_b = vtype.encode("ascii")[:10] if isinstance(vtype, str) else str(vtype).encode("ascii")[:10]
-            rows.append((ts, node_from, node_to, seg_len, vid, start_off, speed, active, vtype_b))
+            vtype = fcd.vehicle_type if fcd.vehicle_type is not None else _get_vtype(vid)
+            # decode if bytes
+            if isinstance(vtype, (bytes, bytearray)):
+                vtype = vtype.decode("utf-8", errors="ignore")
+
+            # force string (also converts np.bytes_)
+            vtype = str(vtype)
+            rows
 
         if len(rows) == 0:
             return 0

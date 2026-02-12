@@ -72,7 +72,11 @@ def load_vehicles(input_path: str):
         active=row["active"],
         fcd_sampling_period=row["fcd_sampling_period"],
         status=row["status"],
-        vehicle_type=row.get("vehicle_type", "car")  # Default to "car" if not specified
+        vehicle_type=str(
+            row.get("vehicle_type", "car").decode("utf-8", errors="ignore")
+            if isinstance(row.get("vehicle_type", "car"), (bytes, bytearray))
+            else row.get("vehicle_type", "car")
+        ).lower()
     ) for (_, row) in df.iterrows()]
 
     filtered_count = 0

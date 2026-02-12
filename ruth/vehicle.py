@@ -162,6 +162,11 @@ class Vehicle:
             self.time_offset = self.time_offset.to_pytimedelta()
         if isinstance(self.fcd_sampling_period, pd.Timedelta):
             self.fcd_sampling_period = self.fcd_sampling_period.to_pytimedelta()
+        # normalize vehicle_type to string
+        if isinstance(self.vehicle_type, (bytes, bytearray)):
+            self.vehicle_type = self.vehicle_type.decode("utf-8", errors="ignore")
+        self.vehicle_type = str(self.vehicle_type).lower()
+
 
     def __getstate__(self):
         state = asdict(self)

@@ -185,9 +185,22 @@ class Simulation:
     @staticmethod
     def load_h5_df(path):
         with h5py.File(path, 'r') as f:
+            ds = f["fcd"]
+            try:
+                arr = ds.asstr()[:]   
+            except Exception:
+                arr = ds[:]          
+
+            df = pd.DataFrame(arr)
             df = pd.DataFrame(f['fcd'][:])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
 
+            if "vehicle_type" in df.columns:
+                df["vehicle_type"] = df["vehicle_type"].apply(
+                    lambda x: x.decode("utf-8", errors="ignore")
+                    if isinstance(x, (bytes, bytearray, np.bytes_))
+                    else x
+                )
             return {
                 "df": df,
                 "departure_time": f.attrs['departure_time'],

@@ -21,7 +21,7 @@ DEFAULT_VEHICLE_CLASSES: Dict[str, VehicleClassParams] = {
     "car": VehicleClassParams(
         name="car",
         length_m=4.5,
-        max_speed_mps=13.9,  # ~50 km/h
+        max_speed_mps=33.3,  # ~120 km/h
         accel_mps2=2.5,
         decel_mps2=4.5,
         reaction_time_s=1.0,
@@ -31,11 +31,12 @@ DEFAULT_VEHICLE_CLASSES: Dict[str, VehicleClassParams] = {
     "truck": VehicleClassParams(
         name="truck",
         length_m=8.0,
-        max_speed_mps=11.1,  # ~40 km/h
+        max_speed_mps=22.2,  # ~80 km/h 
         accel_mps2=1.4,
         decel_mps2=3.2,
         reaction_time_s=1.2,
         pcu=1.8,
         standstill_gap_m=4.0,
     ),
+
 }

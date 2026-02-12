@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import List
 import h5py
 import numpy as np
+from shapely import buffer
 
 from .map import Map
 
@@ -15,7 +16,7 @@ compound_dtype = np.dtype([
     ("start_offset_m", np.float32),
     ("speed_mps", np.float32),
     ("active", np.bool_),
-    ("vehicle_type", "S8")
+    ("vehicle_type", h5py.string_dtype(encoding="utf-8"))
 ])
 
 class HDF5Writer:
@@ -66,7 +67,7 @@ class HDF5Writer:
                 float(fcd.start_offset),
                 fcd.speed,
                 fcd.active,
-                (fcd.vehicle_type or "").encode("utf-8")  
+                str(fcd.vehicle_type or "")
             ) for fcd in buffer],
             dtype=compound_dtype
         )
@@ -78,7 +79,6 @@ class HDF5Writer:
         self.file["fcd"][self.index:self.index + data_len] = data
         self.index += data_len
         self.file.flush()
-        return data_len
 
     def close(self):
         self.file.close()

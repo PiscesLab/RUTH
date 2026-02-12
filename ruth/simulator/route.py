@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import math
 from datetime import datetime, timedelta
@@ -5,307 +6,453 @@ from typing import List, Tuple
 
 from .queues import QueuesManager
 from ..data.map import Map
-from ..data.segment import Segment, SegmentPosition, SpeedMps, SpeedKph, LengthMeters, speed_kph_to_mps
+from ..data.segment import Segment, SegmentPosition, SpeedMps, SpeedKph, LengthMeters
 from .simulation import FCDRecord
 from ..globalview import GlobalView
-from ..vehicle import Vehicle
 
 logger = logging.getLogger(__name__)
 
-turn_log_count = 0
+
+def _norm_vtype(vt) -> str:
+    if isinstance(vt, (bytes, bytearray)):
+        return vt.decode("utf-8", errors="ignore")
+    return str(vt)
+
+
+def _as_float(x) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float(str(x))
+
+
+def _stable_driver_factor(vehicle_id: int) -> float:
+    """
+    Stable per-vehicle factor in [0.92, 1.08].
+    Deterministic: same vehicle_id -> same factor forever.
+    """
+    h = hashlib.md5(str(int(vehicle_id)).encode()).hexdigest()
+    x = int(h[:8], 16)
+    return 0.92 + (x % 1600) / 10000.0  # 0.92 .. 1.08
+
+
+def _edge_highway_type(routing_map: Map, seg: Segment) -> str:
+    u, v = seg.node_from, seg.node_to
+    try:
+        data = routing_map.current_network[u][v][0]
+        hw = data.get("highway", "unclassified")
+        if isinstance(hw, list) and hw:
+            return str(hw[0])
+        return str(hw)
+    except Exception:
+        return "unclassified"
+
+
+def _edge_freeflow_kph(routing_map: Map, seg: Segment) -> float:
+    """
+    Best-effort free-flow speed (kph) from edge data.
+    Priority: current_speed -> speed_kph -> maxspeed -> seg.max_allowed_speed_kph
+    """
+    u, v = seg.node_from, seg.node_to
+
+    try:
+        data = routing_map.current_network[u][v][0]
+
+        if data.get("current_speed") is not None:
+            k = _as_float(data["current_speed"])
+            if k > 0:
+                return k
+
+        if data.get("speed_kph") is not None:
+            k = _as_float(data["speed_kph"])
+            if k > 0:
+                return k
+
+        if data.get("maxspeed") is not None:
+            ms = data["maxspeed"]
+            if isinstance(ms, list) and ms:
+                k = _as_float(ms[0])
+            else:
+                k = _as_float(ms)
+            if k > 0:
+                return k
+    except Exception:
+        pass
+
+    try:
+        k = _as_float(getattr(seg, "max_allowed_speed_kph", 0.0))
+        if k > 0:
+            return k
+    except Exception:
+        pass
+
+    return 0.0
+
+
+def _compute_turn_type(routing_map: Map, prev_seg: Segment, next_seg: Segment) -> Tuple[str, float]:
+    """
+    Returns (turn_type, abs_angle_deg)
+      turn_type: straight | turn | u_turn
+    """
+    try:
+        if prev_seg.node_from == next_seg.node_from and prev_seg.node_to == next_seg.node_to:
+            return "straight", 0.0
+
+        n = routing_map.network.nodes
+        from_pos = (n[prev_seg.node_from]["x"], n[prev_seg.node_from]["y"])
+        to_pos = (n[prev_seg.node_to]["x"], n[prev_seg.node_to]["y"])
+        next_to_pos = (n[next_seg.node_to]["x"], n[next_seg.node_to]["y"])
+
+        cur_vec = (to_pos[0] - from_pos[0], to_pos[1] - from_pos[1])
+        nxt_vec = (next_to_pos[0] - to_pos[0], next_to_pos[1] - to_pos[1])
+
+        cur_ang = math.atan2(cur_vec[1], cur_vec[0])
+        nxt_ang = math.atan2(nxt_vec[1], nxt_vec[0])
+        diff = nxt_ang - cur_ang
+
+        while diff > math.pi:
+            diff -= 2 * math.pi
+        while diff < -math.pi:
+            diff += 2 * math.pi
+
+        abs_ang = abs(diff)
+        abs_deg = abs_ang * 180.0 / math.pi
+
+        if abs_ang < math.radians(30):
+            return "straight", abs_deg
+        if abs_ang > math.radians(150):
+            return "u_turn", abs_deg
+        return "turn", abs_deg
+    except Exception:
+        return "straight", 0.0
 
 
 def move_on_segment(
-        vehicle: Vehicle,
-        driving_route_part: List[Segment],
-        current_time: datetime,
-        gv_db: GlobalView,
-        routing_map: Map,
-        los_vehicles_tolerance: timedelta = timedelta(seconds=0)
+    vehicle,
+    driving_route_part: List[Segment],
+    current_time: datetime,
+    gv_db: GlobalView,
+    routing_map: Map,
+    los_vehicles_tolerance: timedelta = timedelta(seconds=0),
 ) -> Tuple[datetime, SegmentPosition, SpeedMps]:
     """
-    Moves the car on its current segment.
-    Returns (time, position, speed) at the end of the movement.
+    Move vehicle for one tick (vehicle.frequency).
+    Returns (end_time, new_segment_position, effective_speed_mps_over_tick).
     """
-    segment_position = vehicle.segment_position
-    start_position = segment_position.position
-    current_segment = driving_route_part[0]
-    assert segment_position.position <= current_segment.length
 
-    turn_type = 'straight'
-    abs_angle_deg = 0.0
-    next_segment = None
-    prev_segment = None
+    tick_s = vehicle.frequency.total_seconds()
+    end_time = current_time + vehicle.frequency
 
-    if start_position == current_segment.length:
-        # if the vehicle is at the end of a segment and there are more segments in the route
+    if not driving_route_part or tick_s <= 0:
+        return end_time, vehicle.segment_position, SpeedMps(0.0)
+
+    vtype = _norm_vtype(getattr(vehicle, "vehicle_type", "car"))
+
+    seg_index = int(vehicle.segment_position.index)
+    pos_m = _as_float(vehicle.segment_position.position)
+
+    # The "current segment" in this tick is the segment at driving_route_part[0]
+    current_seg = driving_route_part[0]
+    seg_len_m = _as_float(current_seg.length)
+    if pos_m > seg_len_m:
+        pos_m = seg_len_m
+
+    # -------------------------
+    # IMPORTANT FIX: if already at end, jump to next segment start (index+1)
+    # -------------------------
+    if math.isclose(pos_m, seg_len_m, abs_tol=1e-6):
+        # last segment -> nothing to do
+        if seg_index >= (len(vehicle.osm_route) - 1):
+            return end_time, vehicle.segment_position, SpeedMps(0.0)
+
+        # next segment closed -> wait
         if vehicle.has_next_segment_closed(routing_map):
-            return current_time + vehicle.frequency, vehicle.segment_position, SpeedMps(0.0)
-        
-        # Save the previous segment before switching
-        prev_segment = current_segment
-        
-        # Calculate turn type before moving to next segment
-        next_segment = driving_route_part[1]
-        
-        if current_segment.node_from == next_segment.node_from and current_segment.node_to == next_segment.node_to:
-            logger.warning(f"Vehicle {vehicle.id} moving to same edge, classifying as straight")
-            turn_type = 'straight'
-            abs_angle_deg = 0.0
+            return end_time, vehicle.segment_position, SpeedMps(0.0)
+
+        # move to next segment at 0
+        seg_index += 1
+        pos_m = 0.0
+
+        # if we have the next segment in driving_route_part, use it
+        if len(driving_route_part) > 1:
+            current_seg = driving_route_part[1]
+            seg_len_m = _as_float(current_seg.length)
         else:
-            from_pos = (routing_map.network.nodes[current_segment.node_from]['x'], routing_map.network.nodes[current_segment.node_from]['y'])
-            to_pos = (routing_map.network.nodes[current_segment.node_to]['x'], routing_map.network.nodes[current_segment.node_to]['y'])
-            next_to_pos = (routing_map.network.nodes[next_segment.node_to]['x'], routing_map.network.nodes[next_segment.node_to]['y'])
-            
-            current_vector = (to_pos[0] - from_pos[0], to_pos[1] - from_pos[1])
-            next_vector = (next_to_pos[0] - to_pos[0], next_to_pos[1] - to_pos[1])
-            
-            current_angle = math.atan2(current_vector[1], current_vector[0])
-            next_angle = math.atan2(next_vector[1], next_vector[0])
-            angle_diff = next_angle - current_angle
-            
-            # Normalize to -pi to pi
-            while angle_diff > math.pi:
-                angle_diff -= 2 * math.pi
-            while angle_diff < -math.pi:
-                angle_diff += 2 * math.pi
-            
-            abs_angle = abs(angle_diff)
-            if abs_angle < math.radians(30):
-                turn_type = 'straight'
-            elif abs_angle > math.radians(150):
-                turn_type = 'u_turn'
+            # fallback: build a new segment from osm nodes
+            u = vehicle.osm_route[seg_index]
+            v = vehicle.osm_route[seg_index + 1]
+            current_seg = routing_map.osm_route_to_py_segments([u, v])[0]
+            seg_len_m = _as_float(current_seg.length)
+
+    # -------------------------
+    # Turn penalty (only matters if we started exactly at boundary and just entered new segment)
+    # We compute it using prev (old) and new segments if available.
+    # -------------------------
+    turn_penalty_s = 0.0
+    if pos_m <= 1e-9 and len(driving_route_part) > 1:
+        # We entered a new segment this tick (or are at start), and we can look at prev->next
+        prev_seg = driving_route_part[0]
+        next_seg = driving_route_part[1]
+        turn_type, abs_deg = _compute_turn_type(routing_map, prev_seg, next_seg)
+        if turn_type != "straight":
+            if vtype == "truck":
+                turn_penalty_s = 1.8 if turn_type == "turn" else 3.2
             else:
-                turn_type = 'turn'
-            
-            abs_angle_deg = abs_angle * 180 / math.pi
-        next_segment = driving_route_part[1]
-        
-        # if the vehicle can move to the next segment, work with the next segment
-        start_position = LengthMeters(0.0)
-        segment_position = SegmentPosition(segment_position.index + 1, start_position)
-        current_segment = next_segment
+                turn_penalty_s = 1.0 if turn_type == "turn" else 2.0
 
-    if segment_position.index == (len(vehicle.osm_route) - 1) and start_position == current_segment.length:
-        # the end of the driving route
-        level_of_service = 1.0
-    else:
-        level_of_service = gv_db.level_of_service_in_front_of_vehicle(current_time, current_segment, vehicle.id,
-                                                                         start_position, los_vehicles_tolerance,
-                                                                         limit_vehicle_count=(start_position == 0.0))
+            # If traffic is already heavy, turning costs more time
+            # (keeps turning effects visible)
+            # We'll apply this after LoS is computed.
 
-    # if car is stuck in traffic jam, it will not move and its speed will be 0
-    if level_of_service == float("inf"):
-        # in case the vehicle is stuck in traffic jam just move the time
-        return current_time + vehicle.frequency, vehicle.segment_position, SpeedMps(0.0)
+    if turn_penalty_s >= tick_s:
+        return end_time, SegmentPosition(seg_index, LengthMeters(pos_m)), SpeedMps(0.0)
 
-    # Speed in m/s
-    # Get highway type from the map
-    try:
-        highway_data = routing_map.current_network[current_segment.node_from][current_segment.node_to][0].get('highway', 'unclassified')
-        if isinstance(highway_data, list):
-            highway_type = highway_data[0]  # Take the primary highway type
-        else:
-            highway_type = highway_data
-    except KeyError:
-        highway_type = 'unclassified'  # Fallback if edge not found
-    
+    # -------------------------
+    # Level of Service
+    # -------------------------
+    los = gv_db.level_of_service_in_front_of_vehicle(
+        current_time,
+        current_seg,
+        vehicle.id,
+        LengthMeters(pos_m),
+        los_vehicles_tolerance,
+        limit_vehicle_count=(pos_m <= 1e-9),
+    )
+
+    if los == float("inf"):
+        return end_time, SegmentPosition(seg_index, LengthMeters(pos_m)), SpeedMps(0.0)
+
+    los = float(los)
+
+    # Increase turn penalty slightly in congestion (optional but realistic)
+    if turn_penalty_s > 0 and los < 0.6:
+        turn_penalty_s *= 1.25
+        if turn_penalty_s >= tick_s:
+            return end_time, SegmentPosition(seg_index, LengthMeters(pos_m)), SpeedMps(0.0)
+
+    # -------------------------
+    # Free-flow speed on this edge (kph)
+    # -------------------------
+    ff_kph = _edge_freeflow_kph(routing_map, current_seg)
+    if ff_kph <= 0.0:
+        return end_time, SegmentPosition(seg_index, LengthMeters(pos_m)), SpeedMps(0.0)
+
+    # Cap by vehicle-type legal/desired speed limit (truck slower than car!)
     from ..utils import get_speed_limit_kph
-    speed_limit_kph = get_speed_limit_kph(highway_type, vehicle.vehicle_type)
-    segment_max_speed = speed_kph_to_mps(SpeedKph(speed_limit_kph * level_of_service))
-    vehicle_max_speed = vehicle.max_speed_mps
-    speed_mps = min(segment_max_speed, vehicle_max_speed)
-    
-    # Apply turning delay reduction
-    if turn_type != 'straight':
-        base_speed = speed_mps
-        if vehicle.vehicle_type == 'car':
-            if turn_type == 'turn':
-                multiplier = 0.7
-            else:  # u_turn
-                multiplier = 0.5
-        else:  # truck
-            if turn_type == 'turn':
-                multiplier = 0.6
-            else:
-                multiplier = 0.4
-        if level_of_service < 0.5:
-            multiplier *= 0.8
-        speed_mps *= multiplier
-        
-        global turn_log_count
-        if turn_log_count < 50:
-            turn_log_count += 1
-            logger.info(f"Turn delay: {vehicle.id}, {vehicle.vehicle_type}, prev {prev_segment.node_from}->{prev_segment.node_to}, next {current_segment.node_from}->{current_segment.node_to}, angle {abs_angle_deg:.1f}, {turn_type}, base {base_speed:.2f}, mult {multiplier:.2f}, final {speed_mps:.2f}, los {level_of_service:.2f}")
-    
-    if math.isclose(speed_mps, 0.0):
-        # in case the vehicle is not moving, move the time and keep the previous position
-        return current_time + vehicle.frequency, vehicle.segment_position, SpeedMps(0.0)
+    highway_type = _edge_highway_type(routing_map, current_seg)
+    type_limit_kph = float(get_speed_limit_kph(highway_type, vtype))
+    if type_limit_kph > 0:
+        ff_kph = min(ff_kph, type_limit_kph)
 
-    frequency_s = vehicle.frequency.total_seconds()
-    elapsed_m = frequency_s * speed_mps
-    end_position = LengthMeters(start_position + elapsed_m)
+    # -------------------------
+    # Convert LoS to traffic factor (nonlinear to avoid flat 2-value speeds)
+    #  - los=1.0 => ~1.0
+    #  - los small => drops smoothly
+    # -------------------------
+    traffic_factor = 0.20 + 0.80 * (los ** 1.6)
 
-    if end_position < current_segment.length:
-        return (
-            current_time + timedelta(seconds=frequency_s),
-            SegmentPosition(index=segment_position.index, position=end_position),
-            speed_mps
-        )
-    else:
-        # The car has finished the segment, it stays at the end of it
-        travel_distance_m = current_segment.length - start_position
-        travel_time = travel_distance_m / speed_mps
-        return (
-            current_time + timedelta(seconds=travel_time),
-            SegmentPosition(segment_position.index, current_segment.length),
-            speed_mps
-        )
+    # Base speed in m/s
+    speed_mps = (ff_kph / 3.6) * traffic_factor
+
+    # Stable per-vehicle driver factor -> breaks ties without randomness
+    speed_mps *= _stable_driver_factor(vehicle.id)
+
+    # Clamp by vehicle maximum speed (your VehicleClassParams max_speed_mps)
+    vmax = _as_float(getattr(vehicle, "max_speed_mps", speed_mps))
+    speed_mps = min(speed_mps, vmax)
+
+    if speed_mps <= 1e-9:
+        return end_time, SegmentPosition(seg_index, LengthMeters(pos_m)), SpeedMps(0.0)
+
+    # -------------------------
+    # Move distance inside tick (after turn penalty time)
+    # -------------------------
+    move_time_s = max(tick_s - turn_penalty_s, 0.0)
+
+    remaining_m = max(seg_len_m - pos_m, 0.0)
+    move_distance_m = speed_mps * move_time_s
+    actual_move_m = min(move_distance_m, remaining_m)
+
+    new_pos_m = pos_m + actual_move_m
+
+    # Effective speed over FULL tick (so logs/FCD reflect the true average)
+    effective_speed_mps = actual_move_m / tick_s if tick_s > 0 else 0.0
+
+    return end_time, SegmentPosition(seg_index, LengthMeters(new_pos_m)), SpeedMps(effective_speed_mps)
 
 
-def advance_vehicle(vehicle: Vehicle, departure_time: datetime,
-                    gv_db: GlobalView, routing_map: Map, queues_manager: QueuesManager,
-                    los_vehicles_tolerance: timedelta = timedelta(seconds=0)) -> List[FCDRecord]:
+def advance_vehicle(
+    vehicle,
+    departure_time: datetime,
+    gv_db: GlobalView,
+    routing_map: Map,
+    queues_manager: QueuesManager,
+    los_vehicles_tolerance: timedelta = timedelta(seconds=0),
+) -> List[FCDRecord]:
     """Advance a vehicle on a route."""
-
     current_time = departure_time + vehicle.time_offset
-    fcds = []
 
-    current_vehicle_index = vehicle.segment_position.index
-    osm_route_part = vehicle.osm_route[current_vehicle_index:current_vehicle_index + 3]
+    old_pos = vehicle.segment_position
+
+    # Build a short lookahead route (old index .. old index+2)
+    idx = int(vehicle.segment_position.index)
+    osm_route_part = vehicle.osm_route[idx: idx + 3]
     driving_route_part = routing_map.osm_route_to_py_segments(osm_route_part)
 
-    vehicle_end_time, segment_pos, assigned_speed_mps = move_on_segment(
+    vehicle_end_time, new_pos, assigned_speed_mps = move_on_segment(
         vehicle, driving_route_part, current_time, gv_db, routing_map, los_vehicles_tolerance
     )
 
-    segment_pos_old = vehicle.segment_position
-
-    # check vehicle's first move
-    if segment_pos.index == 0 and segment_pos.position == 0.0:
-        # vehicle could not move on segment, skip this round and just advance the time
+    # If vehicle couldn't move at all on its first segment at time start, just advance time
+    if new_pos.index == 0 and math.isclose(_as_float(new_pos.position), 0.0, abs_tol=1e-9):
         vehicle.time_offset += vehicle.frequency
         return []
 
-    # update the vehicle
+    # Update vehicle state
     vehicle.time_offset += vehicle_end_time - current_time
-    vehicle.set_position(segment_pos)
+    vehicle.set_position(new_pos)
 
-    # step_m = assigned_speed_mps * (vehicle.fcd_sampling_period / timedelta(seconds=1))
-    # segment = driving_route[vehicle.segment_position.index]
-    # dt = departure_time + vehicle.time_offset
-    # logger.info(f"\n{dt} {vehicle.id} ({vehicle.start_distance_offset}) {segment.id} ({segment.length}) step: {step_m}")
-    # logger.info(fcds)
+    # Determine segments for queue operations
+    # Segment at old position:
+    seg_old = driving_route_part[0]
 
-    segment = driving_route_part[segment_pos.index - segment_pos_old.index]
-    segment_old = driving_route_part[0]
+    # Segment at new position (may be next in driving_route_part)
+    if new_pos.index != old_pos.index and len(driving_route_part) > 1:
+        seg_new = driving_route_part[1]
+    else:
+        seg_new = driving_route_part[0]
 
-    # fill in and out of the queues
-    if (segment_pos_old.position == segment_old.length
-            and segment_pos_old.index != vehicle.segment_position.index):
-        # remove vehicle from outdated queue if it changed segment
-        node_from, node_to = vehicle.osm_route[segment_pos_old.index], vehicle.osm_route[segment_pos_old.index + 1]
+    # Remove from outdated queue if it changed segment
+    if (_as_float(old_pos.position) == _as_float(seg_old.length)
+            and old_pos.index != vehicle.segment_position.index):
+        node_from, node_to = vehicle.osm_route[old_pos.index], vehicle.osm_route[old_pos.index + 1]
         queues_manager.remove_vehicle(vehicle, node_from, node_to)
 
-    if vehicle.start_distance_offset == segment.length:
+    # If at end of current segment, handle queue/destination
+    if math.isclose(_as_float(vehicle.segment_position.position), _as_float(seg_new.length), abs_tol=1e-6):
         if vehicle.next_node == vehicle.dest_node:
-            # stop the processing in case the vehicle reached the end
             vehicle.active = False
             queues_manager.remove_inactive_vehicle(vehicle)
-
-        elif segment_pos_old != vehicle.segment_position:
-            # if the vehicle is at the end of the segment and was not there before, add it to the queue
+        elif old_pos != vehicle.segment_position:
             queues_manager.add_to_queue(vehicle)
 
-    # NOTE: the segment position index may end out of segments
-    if segment_pos.index < (len(vehicle.osm_route) - 1):
-        fcds = generate_fcds(current_time, vehicle_end_time, segment_pos_old, segment_pos, assigned_speed_mps, vehicle,
-                             driving_route_part, remains_active=vehicle.active)
+    # Generate FCD if still within route bounds
+    if vehicle.segment_position.index < (len(vehicle.osm_route) - 1):
+        return generate_fcds(
+            current_time,
+            vehicle_end_time,
+            old_pos,
+            vehicle.segment_position,
+            assigned_speed_mps,
+            vehicle,
+            [seg_new],  # generate on the current segment only
+            remains_active=vehicle.active,
+        )
 
-    return fcds
+    return []
 
 
-def advance_waiting_vehicle(vehicle: Vehicle, routing_map: Map, departure_time: datetime) -> List[FCDRecord]:
+def advance_waiting_vehicle(vehicle, routing_map: Map, departure_time: datetime) -> List[FCDRecord]:
     current_time = departure_time + vehicle.time_offset
 
-    current_vehicle_index = vehicle.start_index
-    osm_route_part = vehicle.osm_route[current_vehicle_index:current_vehicle_index + 3]
+    idx = int(vehicle.start_index)
+    osm_route_part = vehicle.osm_route[idx: idx + 2]
     driving_route_part = routing_map.osm_route_to_py_segments(osm_route_part)
 
-    # in case the vehicle is not moving, move the time and keep the previous position
     vehicle_end_time = current_time + vehicle.frequency
-    segment_pos = vehicle.segment_position
     assigned_speed_mps = SpeedMps(0.0)
 
-    # update the vehicle
     vehicle.time_offset += vehicle_end_time - current_time
 
-    fcds = generate_fcds(current_time, vehicle_end_time, segment_pos, segment_pos, assigned_speed_mps, vehicle,
-                         driving_route_part, remains_active=True)
-    return fcds
+    return generate_fcds(
+        current_time,
+        vehicle_end_time,
+        vehicle.segment_position,
+        vehicle.segment_position,
+        assigned_speed_mps,
+        vehicle,
+        [driving_route_part[0]],
+        remains_active=True,
+    )
 
 
-def generate_fcds(start_time: datetime, end_time: datetime, start_segment_position: SegmentPosition,
-                  end_segment_position: SegmentPosition, speed: SpeedMps, vehicle: Vehicle,
-                  driving_route_part: List[Segment], remains_active: bool) -> List[FCDRecord]:
-    fcds = []
+def generate_fcds(
+    start_time: datetime,
+    end_time: datetime,
+    start_segment_position: SegmentPosition,
+    end_segment_position: SegmentPosition,
+    speed: SpeedMps,
+    vehicle,
+    driving_route_part: List[Segment],
+    remains_active: bool,
+) -> List[FCDRecord]:
+    """
+    Generates FCD points on ONE segment for this tick.
+    (We clamp movement to segment end in move_on_segment(), so this is consistent.)
+    """
+    fcds: List[FCDRecord] = []
 
-    step_m = speed * (vehicle.fcd_sampling_period / timedelta(seconds=1))
+    seg = driving_route_part[0]
+    speed_val = _as_float(speed)
+    step_m = speed_val * _as_float(vehicle.fcd_sampling_period / timedelta(seconds=1))
 
-    # when both start and end positions are on the same segment
-    current_position = start_segment_position.position
-    current_time = start_time
-    current_segment = driving_route_part[0]
+    cur_pos = _as_float(start_segment_position.position)
+    cur_time = start_time
 
-    if current_position == current_segment.length and start_segment_position.index != end_segment_position.index:
-        # when the vehicle finished the segment in the previous round, we will jump to the next segment
-        current_segment = driving_route_part[1]
-        current_position = 0
+    # sample within tick
+    while (cur_time + vehicle.fcd_sampling_period < end_time) and (cur_pos + step_m < _as_float(seg.length)):
+        cur_pos += step_m
+        cur_time += vehicle.fcd_sampling_period
+        fcds.append(
+            FCDRecord(
+                datetime=cur_time,
+                vehicle_id=vehicle.id,
+                segment=seg,
+                start_offset=LengthMeters(cur_pos),
+                speed=SpeedMps(speed_val),
+                status=vehicle.status,
+                active=True,
+                vehicle_type=_norm_vtype(getattr(vehicle, "vehicle_type", "car")),
+            )
+        )
 
-    while current_time + vehicle.fcd_sampling_period < end_time and \
-            current_position + step_m < current_segment.length:
-        current_position += step_m
-        current_time += vehicle.fcd_sampling_period
-        fcds.append(FCDRecord(
-            datetime=current_time,
+    # final point at end_time
+    fcds.append(
+        FCDRecord(
+            datetime=end_time,
             vehicle_id=vehicle.id,
-            segment=current_segment,
-            start_offset=current_position,
-            speed=speed,
+            segment=seg,
+            start_offset=end_segment_position.position,
+            speed=SpeedMps(speed_val),
             status=vehicle.status,
-            active=True,
-            vehicle_type=vehicle.vehicle_type
-        ))
-
-    # store end of the movement
-    fcds.append(FCDRecord(
-        datetime=end_time,
-        vehicle_id=vehicle.id,
-        segment=current_segment,
-        start_offset=end_segment_position.position,
-        speed=speed,
-        status=vehicle.status,
-        active=remains_active,
-        vehicle_type=vehicle.vehicle_type
-    ))
+            active=remains_active,
+            vehicle_type=_norm_vtype(getattr(vehicle, "vehicle_type", "car")),
+        )
+    )
     return fcds
 
 
-def advance_vehicles_with_queues(vehicles_to_be_moved: List[Vehicle], departure_time: datetime,
-                                 gv_db: GlobalView, routing_map: Map, queues_manager: QueuesManager,
-                                 los_vehicles_tolerance) -> Tuple[List[FCDRecord], bool]:
-    fcds = []
-
+def advance_vehicles_with_queues(
+    vehicles_to_be_moved: List,
+    departure_time: datetime,
+    gv_db: GlobalView,
+    routing_map: Map,
+    queues_manager: QueuesManager,
+    los_vehicles_tolerance,
+) -> Tuple[List[FCDRecord], bool]:
+    fcds: List[FCDRecord] = []
     vehicles_moved = False
-    vehicles_in_queues = dict()
+
+    vehicles_in_queues = {}
     for vehicle in vehicles_to_be_moved:
         queue = queues_manager.queues[(vehicle.current_node, vehicle.next_node)]
         if vehicle.id not in queue:
             prev_pos = vehicle.segment_position
-            new_fcds = advance_vehicle(vehicle, departure_time, gv_db, routing_map, queues_manager,
-                                       los_vehicles_tolerance)
+            new_fcds = advance_vehicle(
+                vehicle, departure_time, gv_db, routing_map, queues_manager, los_vehicles_tolerance
+            )
             fcds.extend(new_fcds)
-            vehicles_moved = vehicles_moved or prev_pos != vehicle.segment_position
+            vehicles_moved = vehicles_moved or (prev_pos != vehicle.segment_position)
         else:
             vehicles_in_queues[vehicle.id] = vehicle
 
@@ -317,17 +464,18 @@ def advance_vehicles_with_queues(vehicles_to_be_moved: List[Vehicle], departure_
 
             vehicle = vehicles_in_queues[vehicle_id]
             del vehicles_in_queues[vehicle_id]
-            new_fcds = advance_vehicle(vehicle, departure_time, gv_db, routing_map, queues_manager,
-                                       los_vehicles_tolerance)
+
+            new_fcds = advance_vehicle(
+                vehicle, departure_time, gv_db, routing_map, queues_manager, los_vehicles_tolerance
+            )
             fcds.extend(new_fcds)
+
             was_moved = len(queue) == 0 or (vehicle_id != queue[0])
             vehicles_moved = vehicles_moved or was_moved
             if not was_moved:
                 break
 
     for _, vehicle in vehicles_in_queues.items():
-        new_fcds = advance_waiting_vehicle(vehicle, routing_map, departure_time)
-        fcds.extend(new_fcds)
+        fcds.extend(advance_waiting_vehicle(vehicle, routing_map, departure_time))
 
-    # assert len(fcds) == len(vehicles_to_be_moved)
     return fcds, vehicles_moved
