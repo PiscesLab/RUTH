@@ -270,13 +270,17 @@ def move_on_segment(
     move_time_s = max(tick_s - turn_penalty_s, 0.0)
 
     remaining_m = max(seg_len_m - pos_m, 0.0)
-    move_distance_m = speed_mps * move_time_s
-    actual_move_m = min(move_distance_m, remaining_m)
+    possible_move_m = speed_mps * move_time_s
 
-    new_pos_m = pos_m + actual_move_m
-
-    # Effective speed over FULL tick (so logs/FCD reflect the true average)
-    effective_speed_mps = actual_move_m / tick_s if tick_s > 0 else 0.0
+    if possible_move_m >= remaining_m and speed_mps > 1e-9:
+        travel_time_s = turn_penalty_s + (remaining_m / speed_mps)
+        new_pos_m = seg_len_m
+        end_time = current_time + timedelta(seconds=travel_time_s)
+        effective_speed_mps = speed_mps
+    else:
+        new_pos_m = pos_m + possible_move_m
+        end_time = current_time + vehicle.frequency
+        effective_speed_mps = speed_mps
 
     return end_time, SegmentPosition(seg_index, LengthMeters(new_pos_m)), SpeedMps(effective_speed_mps)
 

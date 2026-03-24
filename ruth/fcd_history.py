@@ -111,16 +111,6 @@ class FCDHistory:
                     # Drop active column like load_h5_df does
                     if 'active' in df.columns:
                         df.drop(columns=['active'], inplace=True)
-                    # Rename columns to match expected format
-                    df = df.rename(columns={
-                        'node_from': 'node_from',
-                        'node_to': 'node_to', 
-                        'segment_length': 'segment_length',
-                        'vehicle_id': 'vehicle_id',
-                        'start_offset_m': 'start_offset_m',
-                        'speed_mps': 'speed_mps',
-                        'vehicle_type': 'vehicle_type'
-                    })
                     # Decode vehicle_type from bytes to string
                     if 'vehicle_type' in df.columns:
                         df['vehicle_type'] = df['vehicle_type'].str.decode('utf-8')

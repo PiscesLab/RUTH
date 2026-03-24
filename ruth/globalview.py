@@ -9,7 +9,7 @@ from .vehicle_types import DEFAULT_VEHICLE_CLASSES
 if TYPE_CHECKING:
     from .simulator.simulation import FCDRecord
 
-
+JAM_DETECTION_MIN_SEGMENT_LENGTH = 10.0
 def _as_float(x) -> float:
     try:
         return float(x)
